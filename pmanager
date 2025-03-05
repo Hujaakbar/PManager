@@ -1,0 +1,297 @@
+#!/usr/bin/python3
+
+from pathlib import Path
+from datetime import datetime
+from typing import KeysView
+
+import argparse
+import json
+import string
+import secrets
+
+
+type Credentials = dict[str, dict[str, str]]
+
+class CustomError:
+    def __init__(self, msg:str):
+        self.error_msg = msg
+
+class FileManager:
+    def __init__(self, folder_name:str, config_filename:str):
+        self._folder_name = folder_name
+        self._config_filename = config_filename
+
+    def get_folder_path(self)->Path:
+        folder = Path().home().joinpath(Path(self._folder_name))
+        folder.mkdir(exist_ok=True)
+        return folder
+
+    def get_config_file(self)->Path:
+        folder = self.get_folder_path()
+        config_file = folder.joinpath(Path(self._config_filename))
+        if not config_file.exists():
+            config_file.touch(exist_ok=True)
+        modified_time = config_file.stat().st_mtime
+        current_time = datetime.now().timestamp()
+        thirty_mins = 30*60
+        if round(current_time - modified_time) > thirty_mins:
+            config_file.write_text(data='', newline='')
+        return config_file
+
+    def write_to_config_file(self, data:str)-> None:
+        config_file = self.get_config_file()
+        config_file.write_text(data, encoding='utf-8')
+        return
+
+
+    def get_config_content(self)-> str|None:
+        config_file = self.get_config_file()
+        stored_content = config_file.read_text(encoding='utf-8')
+        if stored_content:
+            return stored_content
+        return
+
+class PasswordGenerator:
+    def __init__(self, file_manager:FileManager)->None:
+        self.file_manager = file_manager
+
+    def generate_passphrase(self, args: argparse.Namespace)->None:
+        parent_folder = self.file_manager.get_folder_path()
+        word_list = 'words.txt'
+        words_file = parent_folder.joinpath(Path(word_list))
+        if not words_file.is_file() or not words_file.exists():
+            print('Error: cannot find words dictionary file')
+            return
+
+        min_length = args.min_length or 16
+        max_length = 256
+        if args.max_length > min_length:
+            max_length = args.max_length
+        else:
+            print(f'max length should be bigger than min length, {min_length}')
+            return
+        with open(words_file) as f:
+            words = [word.strip() for word in f]
+
+        while True:
+            word_count = secrets.randbelow(3) + 3
+            second_half = ''.join([secrets.choice(string.digits), secrets.choice(words).title(), secrets.choice(string.punctuation)])
+            first_half = '_'.join([ secrets.choice(words) for i in range(word_count)])
+            passphrase = f'{first_half}_{second_half}'
+            length = len(passphrase)
+            if length >= min_length and length < max_length:
+                print(passphrase)
+                break
+
+    def generate_password(self, args:argparse.Namespace)->None:
+        length = args.length or 16
+        if args.number:
+            min_digits = args.number
+
+        alphabet = string.ascii_letters + string.digits
+        if args.special_char:
+            alphabet = string.ascii_letters + string.digits + string.punctuation
+
+        while True:
+            password = ''.join(secrets.choice(alphabet) for i in range(length))
+            if (any(c.islower() for c in password)
+                    and any(c.isupper() for c in password)
+                    and sum(c.isdigit() for c in password) == min_digits):
+                break
+        print(password)
+
+class PManager:
+    def __init__(self, file_manager:FileManager)->None:
+        self.file_manager = file_manager
+
+    def _get_creds_filepath(self)->Path|CustomError:
+        content = self.file_manager.get_config_content()
+        if not content:
+            return CustomError(msg='Error: file is not stored')
+
+        creds_filepath = Path(content)
+        if creds_filepath.is_file() and creds_filepath.exists():
+            return creds_filepath
+        return CustomError(msg='Error: file is not stored')
+
+    def handle_file(self, args: argparse.Namespace)->None:
+        if args.p_file:
+            filepath = Path(args.p_file)
+            if not (filepath and filepath.is_file() and filepath.exists()):
+                print('Error: filepath is not valid or does not exist')
+                return
+            self.file_manager.write_to_config_file(data=str(filepath.resolve()))
+        else:
+            creds_filepath = self._get_creds_filepath()
+            if isinstance(creds_filepath, CustomError):
+                print(creds_filepath.error_msg)
+            else:
+                print(creds_filepath.resolve())
+
+    def _get_entries(self)-> Credentials | CustomError:
+        """
+        Returns dict entries saved in creds file.
+        If creds filepath is not registered, returns CustomError object
+        """
+        creds_filepath = self._get_creds_filepath()
+        if isinstance(creds_filepath, CustomError):
+            return creds_filepath
+
+        content = creds_filepath.read_text()
+        if content:
+            entries:Credentials = json.loads(content)
+            return entries
+        else:
+            return {}
+
+    def _print_results(self, data: Credentials|KeysView|list[str])-> None:
+
+        if isinstance(data, KeysView) or type(data) is list:
+            for index, entry_name in enumerate(data, start=1):
+                print(f'{index}. {entry_name.title()}')
+            return
+        for entry_name, creds in data.items():
+            print(f'\n{entry_name.title()}:')
+            for key, value in creds.items():
+                print(f'\t{key}: {value}')
+        # clearing the memory
+        for key in data.keys():
+            data[key] = "0" * len(data[key])
+
+    def get(self, args: argparse.Namespace):
+        not_exist_message = 'given entry does not exist'
+        entries = self._get_entries()
+        if not entries:
+            print('Error: there are no saved entries')
+            return
+        if isinstance(entries, CustomError):
+            print(entries.error_msg)
+            return
+
+        if args.show_all:
+            self._print_results(entries.keys())
+            return
+
+        entry_name = args.entry_name.lower().strip()
+        result = entries.get(entry_name, None)
+        if result:
+            self._print_results({entry_name: result})
+            return
+
+        if not args.search:
+            print(not_exist_message)
+            return
+
+        if len(entry_name) == 1:
+            matching_entries = [entry for entry in entries.keys() if entry.startswith(entry_name)]
+        else:
+            matching_entries = [entry for entry in entries.keys() if entry_name in entry]
+
+        if matching_entries:
+                self._print_results(matching_entries)
+                return
+        print(not_exist_message)
+
+    def delete(self, args: argparse.Namespace):
+        creds_filepath = self._get_creds_filepath()
+        if isinstance(creds_filepath, CustomError):
+            print(creds_filepath.error_msg)
+            return
+
+        entry_name:str = args.entry_to_delete
+        entries = self._get_entries()
+        deleted_value = entries.pop(entry_name.lower(), None)
+        if not deleted_value:
+            print('Error: given entry does not exist')
+            return
+        confirmation = input('To confirm, please enter entry name again: ')
+        if confirmation == entry_name:
+            creds_filepath.write_text(json.dumps(entries), encoding='utf-8')
+        else:
+            print('confirmation did not match')
+
+    def add(self, args: argparse.Namespace ):
+        creds_filepath = self._get_creds_filepath()
+        if isinstance(creds_filepath, CustomError):
+            print(creds_filepath.error_msg)
+            return
+
+        data:list[str] = args.entry_to_create
+        entry:dict[str, str] = {}
+        for count, pair in enumerate(data):
+            index = pair.find("=")
+            not_found_error_code = -1
+            if index == not_found_error_code:
+                print("Error: Please enter details in key=value format")
+                return
+            key = pair[:index]
+            value = pair[index+1:]
+            if not value:
+                print("Error: Please enter details in key=value format")
+                return
+            if count == 0:
+                entry_name = value.lower()
+                continue
+            entry.update({key:value})
+
+        current_time = datetime.now().strftime('%h_%d_%Y %H:%M:%S')
+        entries = self._get_entries()
+        existing_data = entries.get(entry_name, {})
+        if existing_data:
+            entry.update({'updated_at': current_time})
+            confirmation = input('Entry already exists, do you want to update it? [Y]|[N]: ')
+            if confirmation.lower() != 'y':
+                return
+        existing_data.update(entry)
+        existing_data.setdefault('created_at', current_time)
+        entries[entry_name] = existing_data
+        creds_filepath.write_text(json.dumps(entries), encoding='utf-8')
+
+
+def main():
+    file_manager = FileManager(folder_name='.pmanager', config_filename='config.txt')
+    password_generator = PasswordGenerator(file_manager=file_manager)
+    pm = PManager(file_manager=file_manager)
+
+    parser = argparse.ArgumentParser(description='Reads passwords from a specified json-formatted file')
+    subparsers = parser.add_subparsers()
+
+    parser_create = subparsers.add_parser('create', help='Creates a new entry', description='Creates new entry', )
+    parser_create.add_argument('entry_to_create', metavar='entry', action='extend', nargs='+', help='entry details in key=value pattern')
+    parser_create.set_defaults(func=pm.add)
+
+    parser_get = subparsers.add_parser('get', help='Show entries', description='Shows entries')
+    mex_group_parser_get = parser_get.add_mutually_exclusive_group(required=True)
+    mex_group_parser_get.add_argument('entry_name', metavar='entry_name', nargs='?', help='show details of specified entry, (exact match)')
+    mex_group_parser_get.add_argument('-a', '--all', dest='show_all',action='store_true', help='show all the entries (entry names only)')
+    parser_get.set_defaults(func=pm.get)
+    parser_get.add_argument('-s', '--search', action='store_true', help='show entry names that includes given substring')
+
+    parser_delete = subparsers.add_parser('delete', help='deletes an entry')
+    parser_delete.add_argument('entry_to_delete', metavar='entry_name')
+    parser_delete.set_defaults(func=pm.delete)
+
+    parser_p_file = subparsers.add_parser('file', help='set/show path to JSON file', description='If a filepath provided, uses the file as a credentials file  to retrieve, delete, and add passwords. Otherwise, shows the path of the credentials file (if already stored)')
+    parser_p_file.add_argument('p_file', metavar='filepath', help='Path to JSON file', nargs='?')
+    parser_p_file.set_defaults(func=pm.handle_file)
+
+    parser_gen_password = subparsers.add_parser('password', help='Generates password')
+    parser_gen_password.add_argument('-l', '--length', type=int, default=16, metavar='integer', help='the password length (default: 16 characters)')
+    parser_gen_password.add_argument('-n', '--number', type=int,  default=2, metavar='integer', help='the number of digits to include (default: 2)')
+    parser_gen_password.add_argument('-s', '--special_char', action='store_true',  help='whether to include special characters or not (default False)')
+    parser_gen_password.set_defaults(func=password_generator.generate_password)
+
+
+    parser_gen_passphrase = subparsers.add_parser('passphrase', help='Generates a passphrase that also contains digits and special characters')
+    parser_gen_passphrase.add_argument('-min', '--min-length', type=int, default=16, help='min length of the passphrase (default: 16 characters)')
+    parser_gen_passphrase.add_argument('-max', '--max-length', type=int, default=256,help='max length of the passphrase')
+    parser_gen_passphrase.set_defaults(func=password_generator.generate_passphrase)
+
+    mex_group = parser.add_mutually_exclusive_group()
+    mex_group.add_argument('-v', '--version', action='version', version='%(prog)s 1.0', help='print current version of %(prog)s')
+
+    args = parser.parse_args()
+    args.func(args)
+
+if __name__ == '__main__':
+    main()
